@@ -47,6 +47,7 @@ const STATE_DEFAULTS = {
   nextRunAt: null, // ms; next scheduled image
   lastPushAt: null, // ms
   battery: null, // last level read over MDC, 0-100
+  batteryAt: null, // ms; when it was read
   pendingImage: false, // a manual push is waiting for the display to wake
 };
 

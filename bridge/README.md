@@ -64,6 +64,11 @@ and Wake-on-LAN broadcasts must reach the LAN.
 `GET /bridge/status` shows what the bridge is doing (next image, sleep mode,
 battery); `GET /bridge/last-push.jpg` is the last image pushed.
 
+The battery level is read each time the display wakes for an image and sent
+with the image request, which is how the server's device list gets it (as it
+does from an ESP32 frame). Manual pushes don't make an image request, so they
+update `/bridge/status` but not the server.
+
 ## Sleep
 
 The display is battery-powered and keeps its image with the power off, so it

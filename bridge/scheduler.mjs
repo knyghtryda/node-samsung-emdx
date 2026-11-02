@@ -75,6 +75,7 @@ export default class Scheduler {
       lastPushAt: state.lastPushAt && new Date(state.lastPushAt).toISOString(),
       pendingImage: state.pendingImage,
       battery: state.battery,
+      batteryAt: state.batteryAt && new Date(state.batteryAt).toISOString(),
     };
   }
 
@@ -194,6 +195,11 @@ export default class Scheduler {
     const due = this._isDue(now);
     const usePending = this.store.state.pendingImage && fs.existsSync(this.store.pendingImagePath);
 
+    // Read the battery while the display is awake, before fetching: the
+    // server records it from the image request (X-Battery-Percentage)
+    const battery = await this._readBattery();
+    if (battery !== null) this.store.updateState({ battery, batteryAt: now });
+
     let source;
     try {
       if (usePending) {
@@ -220,9 +226,6 @@ export default class Scheduler {
       if (due) update.nextRunAt = this._computeNextRun(now);
       this.store.updateState(update);
       this._attempts = 0;
-
-      const battery = await this._readBattery();
-      if (battery !== null) this.store.updateState({ battery });
     } catch (err) {
       this._attempts++;
       log.error(`Delivery failed (attempt ${this._attempts}/${MAX_ATTEMPTS}): ${err.message}`);
@@ -260,9 +263,9 @@ export default class Scheduler {
   async _readBattery() {
     const device = this.createDevice();
     try {
-      await device.connect();
+      await device.connect({ timeout: 5_000 });
       const { level } = await device.getBatteryState();
-      return Number.isFinite(level) ? level : null;
+      return Number.isInteger(level) && level >= 0 && level <= 100 ? level : null;
     } catch {
       return null;
     } finally {
