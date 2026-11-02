@@ -10,6 +10,9 @@ const TICK_MS = 30_000;
 // The On Timer is minute-granular and the display takes a moment to boot
 // and join Wi-Fi, so a wake shortly before the due time counts as on time
 const DUE_TOLERANCE_MS = 90_000;
+// The next image is never scheduled sooner than this after a push; longer
+// than DUE_TOLERANCE_MS, so it isn't due the moment it's scheduled
+const MIN_PUSH_GAP_MS = 2 * 60_000;
 // After this many failed attempts at a due image, give up on it and try
 // again later rather than keeping the display awake
 const MAX_ATTEMPTS = 3;
@@ -222,8 +225,14 @@ export default class Scheduler {
         update.pendingImage = false;
         fs.rmSync(this.store.pendingImagePath, { force: true });
       }
-      // A manual push at the due time stands in for the scheduled one
-      if (due) update.nextRunAt = this._computeNextRun(now);
+      // A manual push at the due time stands in for the scheduled one. The
+      // next run comes after the slot just served (the display can wake a
+      // little early) and not right after this push (a late catch-up can
+      // land just before the next slot), or one wake shows two images
+      if (due) {
+        const served = Math.max(now, this.store.state.nextRunAt ?? now);
+        update.nextRunAt = this._computeNextRun(served + MIN_PUSH_GAP_MS);
+      }
       this.store.updateState(update);
       this._attempts = 0;
     } catch (err) {
