@@ -54,7 +54,7 @@ and Wake-on-LAN broadcasts must reach the LAN.
 | `EMDX_MAC` | Display MAC, for Wake-on-LAN | |
 | `TZ` | Time zone; must match the display's clock | system |
 | `BRIDGE_PORT` | Port for the server and the display | `8080` |
-| `ADVERTISE_HOST` | LAN IP the display downloads from | auto-detected |
+| `ADVERTISE_HOST` | LAN IP the display downloads from | the local address on the route to the display |
 | `ADVERTISE_URL` | Full base URL instead of `ADVERTISE_HOST` + port | |
 | `EMDX_ROTATION` | Extra rotation for how the display is mounted (0/90/180/270) | `0` |
 | `EMDX_WIDTH`, `EMDX_HEIGHT` | Panel size in landscape | `2560`, `1440` |
