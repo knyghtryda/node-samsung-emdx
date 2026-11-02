@@ -1,0 +1,23 @@
+# Run from the repository root:
+#   docker compose -f bridge/docker-compose.yml up -d --build
+services:
+  emdx-bridge:
+    build:
+      context: ..
+      dockerfile: bridge/Dockerfile
+    container_name: emdx-bridge
+    restart: unless-stopped
+    # Host networking: the display downloads images from the bridge, and
+    # Wake-on-LAN broadcasts must reach the LAN
+    network_mode: host
+    volumes:
+      - ./data:/data
+    environment:
+      EMDX_HOST: 192.168.1.37 # display IP
+      EMDX_PIN: "000000"
+      EMDX_MAC: 00:00:00:00:00:00 # for Wake-on-LAN (standby mode)
+      TZ: America/Los_Angeles # must match the display's clock
+      # BRIDGE_PORT: 8080
+      # ADVERTISE_HOST: 192.168.1.10 # this host's LAN IP, if auto-detect picks the wrong one
+      # EMDX_ROTATION: 0 # extra rotation for how the display is mounted
+      # AWAKE_MINUTES: 5 # how long the display stays on after an image

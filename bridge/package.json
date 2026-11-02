@@ -1,0 +1,21 @@
+{
+  "name": "samsung-emdx-photoframe-bridge",
+  "version": "0.1.0",
+  "description": "Presents a Samsung EMDX e-paper display to esp32-photoframe-server as an ESP32 PhotoFrame.",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@loxjs/node-local-ip": "^2.0.3",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "sharp": "^0.34.5"
+  }
+}

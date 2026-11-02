@@ -1,4 +1,4 @@
-/node_modules
+node_modules/
 .env
 .DS_Store
 deploy.sh
@@ -7,3 +7,4 @@ web/.queue/
 web/.displays/
 Artwork/
 .claude/
+bridge/data/

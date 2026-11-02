@@ -2,6 +2,13 @@
 
 Control a Samsung EMDX E-Paper Display from the command line or a web interface. Push images to the display over your local network using the Samsung MDC protocol.
 
+## PhotoFrame Bridge
+
+Show photos from Google Photos, Immich, Synology and more on the display, on a
+schedule, through [esp32-photoframe-server](https://github.com/aitjcize/esp32-photoframe-server):
+the bridge presents the display to the server as an ESP32 PhotoFrame. See
+**[bridge/README.md](bridge/README.md)**.
+
 ## Web Interface
 
 A browser-based UI for cropping and pushing images to the display.
