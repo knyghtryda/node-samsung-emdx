@@ -8,7 +8,7 @@ import express from 'express';
 import multer from 'multer';
 import getLocalIp from '@loxjs/node-local-ip';
 import sharp from 'sharp';
-import { Device, discover } from '../lib/index.mjs';
+import { Device, ContentServer, discover, sleepDisplay } from '../lib/index.mjs';
 import { fetchFromProvider, downloadImage, BUILT_IN_PROVIDERS } from './providers.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,7 +24,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const localIp = getLocalIp();
 
-const pendingImages = new Map();
+// Serves each push's content manifest and image to the display
+const contentServer = new ContentServer({ baseUrl: `http://${localIp}:${PORT}`, pathPrefix: '/api/display-content' });
 
 // ─── Per-Display Storage ──────────────────────────────────────────────────────
 
@@ -199,9 +200,8 @@ function scheduleSleep(displayId, { host, pin, mac, minutes, sleepMode = 'manual
 async function performSleep(displayId, { host, pin, mac, sleepMode }) {
   console.log(`\n💤 [${displayId.slice(0, 8)}] Performing ${sleepMode} sleep...`);
   try {
-    const device = new Device({ host, mac: mac || undefined, pin });
-    await device.connect();
-
+    let wakeAt = null;
+    let repeat;
     if (sleepMode === 'scheduled') {
       const schedule = loadDisplaySchedule(displayId);
       if (schedule.enabled && isIntervalSchedule(schedule)) {
@@ -217,23 +217,21 @@ async function performSleep(displayId, { host, pin, mac, sleepMode }) {
           schedule.nextWakeAt = next;
           saveDisplaySchedule(displayId, schedule);
         }
-        const d = new Date(next);
-        await device.setOnTimer({ enabled: true, repeat: 0x02, hour: d.getHours(), minute: d.getMinutes() }).catch(() => {});
-        console.log(`   ⏰ On Timer (interval): ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} daily — due ${d.toLocaleString()}`);
+        wakeAt = new Date(next);
+        console.log(`   ⏰ On Timer (interval): ${String(wakeAt.getHours()).padStart(2, '0')}:${String(wakeAt.getMinutes()).padStart(2, '0')} daily — due ${wakeAt.toLocaleString()}`);
       } else if (schedule.enabled) {
-        const repeatCode = { daily: 0x02, weekdays: 0x03, once: 0x01 }[schedule.repeat] || 0x02;
-        await device.setOnTimer({ enabled: true, repeat: repeatCode, hour: schedule.hour, minute: schedule.minute }).catch(() => {});
+        repeat = { daily: 0x02, weekdays: 0x03, once: 0x01 }[schedule.repeat] || 0x02;
+        // Only the alarm's hh:mm is used
+        wakeAt = new Date();
+        wakeAt.setHours(schedule.hour, schedule.minute, 0, 0);
         console.log(`   ⏰ On Timer: ${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')} (${schedule.repeat})`);
       }
-      await device.setNetworkStandby({ enabled: false }).catch(() => {});
-    } else if (sleepMode === 'deep') {
-      await device.setNetworkStandby({ enabled: false }).catch(() => {});
-    } else {
-      await device.setNetworkStandby({ enabled: true }).catch(() => {});
     }
 
-    await device.setPower({ power: false });
-    await device.disconnect();
+    // Scheduled and deep sleep turn network standby off; manual keeps it on
+    // so Wake-on-LAN still works
+    const mode = sleepMode === 'scheduled' || sleepMode === 'deep' ? 'deep' : 'standby';
+    await sleepDisplay(new Device({ host, mac: mac || undefined, pin }), { mode, wakeAt, repeat });
     console.log(`   ✅ Display powered off (${sleepMode})`);
     noteStatus(displayId, null);
 
@@ -249,54 +247,13 @@ async function performSleep(displayId, { host, pin, mac, sleepMode }) {
 // ─── Push Helpers ─────────────────────────────────────────────────────────────
 
 async function pushImageToDisplay({ imageBuffer, host, pin, mac, displayId, lastImageBuffer, skipHistory = false }) {
-  const pushId = randomUUID().toUpperCase();
-  const fileId = randomUUID().toUpperCase();
-  const fileName = `${fileId}.jpg`;
-  const imageUrl = `http://${localIp}:${PORT}/api/display-content/${pushId}/image`;
-  const contentUrl = `http://${localIp}:${PORT}/api/display-content/${pushId}/content.json`;
-
   const tag = displayId ? ` [${displayId.slice(0, 8)}]` : '';
-  console.log(`\n🖼  Push ${pushId}${tag}`);
+  console.log(`\n🖼  Push${tag}`);
   console.log(`   Image: ${(imageBuffer.length / 1024).toFixed(0)} KB → ${host}`);
 
-  const imageServed = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      pendingImages.delete(pushId);
-      reject(new Error('Display did not download the image within 30 seconds'));
-    }, 30_000);
-
-    pendingImages.set(pushId, {
-      imageBuffer,
-      contentJson: {
-        schedule: [{
-          start_date: '1970-01-01', stop_date: '2999-12-31', start_time: '00:00:00',
-          contents: [{
-            image_url: imageUrl, file_id: fileId,
-            file_path: `/home/owner/content/Downloads/vxtplayer/epaper/mobile/contents/${fileId}/${fileName}`,
-            duration: 91326, file_size: `${imageBuffer.length}`, file_name: fileName,
-          }],
-        }],
-        name: 'node-samsung-emdx', version: 1,
-        create_time: new Date().toISOString().replace('T', ' ').slice(0, 19),
-        id: fileId, program_id: 'com.samsung.ios.ePaper',
-        content_type: 'ImageContent', deploy_type: 'MOBILE',
-      },
-      resolve: () => { clearTimeout(timeout); resolve(undefined); },
-      reject: (err) => { clearTimeout(timeout); reject(err); },
-    });
-  });
-
   const device = new Device({ host, mac: mac || undefined, pin });
-  console.log('   🔄 Connecting...');
-  await device.connect();
-  console.log('   ✅ Connected');
-  await device.setNetworkStandby({ enabled: true }).catch(() => {});
-  console.log(`   🔄 Setting content download → ${contentUrl}`);
-  await device.setContentDownload({ url: contentUrl });
-  await device.disconnect();
-  console.log('   ✅ Waiting for display to download...');
-  await imageServed;
-  console.log('   🎉 Done!');
+  const pushId = await contentServer.push(device, imageBuffer);
+  console.log(`   🎉 Done! (${pushId})`);
 
   // last-push.jpg stores the PRESENTATION image (file orientation) — the
   // payload may carry an extra calibration rotation the previews shouldn't see
@@ -924,26 +881,8 @@ app.get('/api/discover', async (_req, res) => {
 
 // ─── Display content endpoints (called by Samsung hardware) ─────────────────
 
-app.get('/api/display-content/:id/content.json', (req, res) => {
-  const entry = pendingImages.get(req.params.id);
-  if (!entry) return res.status(404).json({ error: 'Not found' });
-  console.log(`  📥 Display fetching content.json for ${req.params.id}`);
-  res.header('Content-Type', 'application/json');
-  res.send(JSON.stringify(entry.contentJson).replaceAll('/', '\\/'));
-  req.once('close', () => console.log('  ✅ content.json served'));
-});
-
-app.get('/api/display-content/:id/image', (req, res) => {
-  const entry = pendingImages.get(req.params.id);
-  if (!entry) return res.status(404).json({ error: 'Not found' });
-  console.log(`  📥 Display downloading image for ${req.params.id}`);
-  res.header('Content-Type', 'image/jpeg');
-  res.send(entry.imageBuffer);
-  req.once('close', () => {
-    console.log('  ✅ Image served to display');
-    pendingImages.delete(req.params.id);
-    entry.resolve();
-  });
+app.use((req, res, next) => {
+  if (!contentServer.handle(req, res)) next();
 });
 
 // ─── Per-display middleware ──────────────────────────────────────────────────

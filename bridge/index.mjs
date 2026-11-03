@@ -30,6 +30,15 @@ if (!host || !pin) {
 }
 const mac = env('EMDX_MAC');
 
+function numberEnv(name, fallback) {
+  const raw = env(name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (Number.isFinite(value)) return value;
+  console.error(`Ignoring ${name}=${raw}: not a number (using ${fallback})`);
+  return fallback;
+}
+
 // The local address the OS routes to the display from. With several
 // interfaces (VPN, Docker, WSL) the first one is often not on the display's
 // network. Connecting a UDP socket only looks up the route; nothing is sent.
@@ -45,17 +54,17 @@ async function localAddressFor(target) {
   }
 }
 
-const port = parseInt(env('BRIDGE_PORT', '8080'), 10);
+const port = numberEnv('BRIDGE_PORT', 8080);
 // How the DISPLAY reaches the bridge to download images; in a container this
 // must be the host's LAN address, not the container's
-const advertiseUrl = env('ADVERTISE_URL', `http://${env('ADVERTISE_HOST', await localAddressFor(host))}:${port}`);
+const advertiseUrl = env('ADVERTISE_URL') ?? `http://${env('ADVERTISE_HOST') ?? await localAddressFor(host)}:${port}`;
 
 // Native panel size in landscape; portrait swaps it, so the server renders
 // the image upright and the display gets it as-is
-const longSide = parseInt(env('EMDX_WIDTH', '2560'), 10);
-const shortSide = parseInt(env('EMDX_HEIGHT', '1440'), 10);
+const longSide = numberEnv('EMDX_WIDTH', 2560);
+const shortSide = numberEnv('EMDX_HEIGHT', 1440);
 // Extra rotation for how the display is mounted (0, 90, 180, 270)
-const rotation = ((parseInt(env('EMDX_ROTATION', '0'), 10) % 360) + 360) % 360;
+const rotation = ((numberEnv('EMDX_ROTATION', 0) % 360) + 360) % 360;
 
 const store = new Store(env('DATA_DIR', './data'));
 
@@ -64,7 +73,7 @@ const frame = {
   rotation,
   // Minutes the display stays on after an image, capped at half the time
   // to the next one
-  awakeMinutes: Math.max(1, parseFloat(env('AWAKE_MINUTES', '5'))),
+  awakeMinutes: Math.max(1, numberEnv('AWAKE_MINUTES', 5)),
   dims: () => (store.config.display_orientation === 'portrait'
     ? [Math.min(longSide, shortSide), Math.max(longSide, shortSide)]
     : [Math.max(longSide, shortSide), Math.min(longSide, shortSide)]),

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -22,6 +23,9 @@ const CONFIG_DEFAULTS = {
   sleep_schedule_end: 420,
   timezone: '',
 };
+
+// The server's frame-password flow; meaningless without a password gate
+const IGNORED_CONFIG_KEYS = ['http_password', 'http_password_current'];
 
 // Tone mapping only: dithering keys are kept for the server's sake but the
 // server ignores them for display_type "rgb"
@@ -48,7 +52,7 @@ const STATE_DEFAULTS = {
   lastPushAt: null, // ms
   battery: null, // last level read over MDC, 0-100
   batteryAt: null, // ms; when it was read
-  pendingImage: false, // a manual push is waiting for the display to wake
+  pendingImage: null, // id of a manual push waiting for the display to wake
 };
 
 export default class Store {
@@ -62,7 +66,7 @@ export default class Store {
     this.state = { ...STATE_DEFAULTS, ...this._read('state.json') };
   }
 
-  get pendingImagePath() { return path.join(this.dataDir, 'pending.png'); }
+  pendingImagePath(id) { return path.join(this.dataDir, `pending-${id}.png`); }
   get lastImagePath() { return path.join(this.dataDir, 'last-push.jpg'); }
 
   _read(name) {
@@ -87,10 +91,15 @@ export default class Store {
     this._write('state.json', this.state);
   }
 
+  // Merges fields from the server, however they arrive (config API or
+  // X-Config-Payload). Returns the config from before, to compare against.
   updateConfig(fields) {
+    const before = this.config;
     this.config = { ...this.config, ...fields };
+    for (const key of IGNORED_CONFIG_KEYS) delete this.config[key];
     this._write('config.json', this.config);
     this._touch();
+    return before;
   }
 
   replaceProcessing(settings) {
@@ -104,6 +113,22 @@ export default class Store {
     this.palette = palette;
     this._write('palette.json', this.palette);
     this._touch();
+  }
+
+  // A manual push replaces any earlier one still waiting. Each gets its own
+  // file, so a delivery in progress can't clear one that arrived meanwhile.
+  queuePendingImage(buffer) {
+    const previous = this.state.pendingImage;
+    const id = randomUUID();
+    fs.writeFileSync(this.pendingImagePath(id), buffer);
+    this.updateState({ pendingImage: id });
+    if (previous) fs.rmSync(this.pendingImagePath(previous), { force: true });
+  }
+
+  // Manual push `id` is done with (shown, or given up on)
+  clearPendingImage(id) {
+    if (this.state.pendingImage === id) this.updateState({ pendingImage: null });
+    fs.rmSync(this.pendingImagePath(id), { force: true });
   }
 
   updateState(fields) {
