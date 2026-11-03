@@ -64,18 +64,21 @@ export default function frameApi({ store, scheduler, frame }) {
   });
 
   // "Push to frame" from the server's gallery. The display may be asleep, so
-  // the image is queued and shown as soon as the display answers.
-  router.post('/api/display-image', upload.single('image'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ message: 'Missing "image" file' });
+  // the image is queued and shown as soon as the display answers. The server
+  // also sends a thumbnail (for the frame's own UI); it's accepted and unused.
+  const pushFields = upload.fields([{ name: 'image', maxCount: 1 }, { name: 'thumbnail', maxCount: 1 }]);
+  router.post('/api/display-image', pushFields, async (req, res) => {
+    const file = req.files?.image?.[0];
+    if (!file) return res.status(400).json({ message: 'Missing "image" file' });
     try {
-      await sharp(req.file.buffer).metadata();
+      await sharp(file.buffer).metadata();
     } catch {
       return res.status(415).json({
         message: 'Not a PNG/JPEG image. The server must know this frame as display_type "rgb" so it sends full-color PNG.',
       });
     }
-    store.queuePendingImage(req.file.buffer);
-    log.info(`Manual push queued (${Math.round(req.file.size / 1024)} KB)`);
+    store.queuePendingImage(file.buffer);
+    log.info(`Manual push queued (${Math.round(file.size / 1024)} KB)`);
     scheduler.poke();
     res.json({ status: 'success' });
   });
