@@ -16,6 +16,9 @@ export async function fetchFrameImage({ store, frame, onConfig = () => {} }) {
     'X-Display-Width': `${width}`,
     'X-Display-Height': `${height}`,
     'X-Display-Orientation': config.display_orientation === 'portrait' ? 'portrait' : 'landscape',
+    // Also reported by /api/system-info; sent here too so the server gets it
+    // even if the bridge was unreachable when it was added
+    'X-Display-Type': 'rgb',
     'X-Processing-Settings': JSON.stringify(processing),
     'X-Firmware-Version': frame.version,
     'X-Config-Last-Updated': `${state.configLastUpdated}`,
@@ -36,10 +39,10 @@ export async function fetchFrameImage({ store, frame, onConfig = () => {} }) {
   if (payload) {
     try {
       const { config: cfg, processing_settings: proc, color_palette: palette } = JSON.parse(payload);
-      if (cfg) store.updateConfig(cfg);
+      const before = cfg ? store.updateConfig(cfg) : store.config;
       if (proc) store.replaceProcessing(proc);
       if (palette) store.replacePalette(palette);
-      onConfig();
+      onConfig(before);
     } catch {
       // A malformed payload must not cost us the image
     }

@@ -19,6 +19,10 @@ const MAX_ATTEMPTS = 3;
 const RETRY_LATER_MS = 15 * 60_000;
 // Standby mode: how often to retry Wake-on-LAN for a display that won't answer
 const WAKE_RETRY_MS = 2 * 60_000;
+// Config that decides when images are due. The server re-sends the whole
+// config on any edit; only a change to these moves the next run, so saving a
+// device name can't skip a due image or cancel a retry.
+const SCHEDULE_KEYS = ['auto_rotate', 'rotate_cron', 'sleep_schedule_enabled', 'sleep_schedule_start', 'sleep_schedule_end'];
 
 // Drives one EMDX display through the frame's rotation schedule:
 //   asleep -> (RTC alarm or Wake-on-LAN) -> online -> fetch + push -> awake
@@ -52,16 +56,20 @@ export default class Scheduler {
     setImmediate(() => this.tick());
   }
 
-  configChanged() {
-    const { auto_rotate } = this.store.config;
-    if (!auto_rotate) {
-      this.store.updateState({ nextRunAt: null });
-    } else if (this.store.state.lastPushAt) {
-      // A new schedule takes effect from now
-      this.store.updateState({ nextRunAt: this._computeNextRun(Date.now()) });
-    } else {
-      // Nothing shown yet: show the first image right away
-      this.store.updateState({ nextRunAt: Date.now() });
+  // `before` is the config from before the change (Store.updateConfig)
+  configChanged(before) {
+    const { config } = this.store;
+    const scheduleChanged = SCHEDULE_KEYS.some(key => JSON.stringify(before[key]) !== JSON.stringify(config[key]));
+    if (scheduleChanged) {
+      if (!config.auto_rotate) {
+        this.store.updateState({ nextRunAt: null });
+      } else if (this.store.state.lastPushAt) {
+        // A new schedule takes effect from now
+        this.store.updateState({ nextRunAt: this._computeNextRun(Date.now()) });
+      } else {
+        // Nothing shown yet: show the first image right away
+        this.store.updateState({ nextRunAt: Date.now() });
+      }
     }
     this.poke();
   }
@@ -76,7 +84,7 @@ export default class Scheduler {
       awakeUntil: this._awakeUntil && new Date(this._awakeUntil).toISOString(),
       nextRunAt: state.nextRunAt && new Date(state.nextRunAt).toISOString(),
       lastPushAt: state.lastPushAt && new Date(state.lastPushAt).toISOString(),
-      pendingImage: state.pendingImage,
+      pendingImage: !!state.pendingImage,
       battery: state.battery,
       batteryAt: state.batteryAt && new Date(state.batteryAt).toISOString(),
     };
@@ -92,13 +100,11 @@ export default class Scheduler {
     return 'deep';
   }
 
+  // The bridge reports a cron schedule (rotate_cron) like current firmware,
+  // so the server always sends one; the rotate_interval it adds for old
+  // firmware is ignored
   _computeNextRun(from) {
-    const { rotate_cron, rotate_interval } = this.store.config;
-    // Old firmware configs carry a plain interval in seconds instead
-    if (!Array.isArray(rotate_cron) && Number.isFinite(rotate_interval) && rotate_interval > 0) {
-      return from + rotate_interval * 1000;
-    }
-    const next = nextRun(rotate_cron, { from: new Date(from), quiet: quietHoursFromConfig(this.store.config) });
+    const next = nextRun(this.store.config.rotate_cron, { from: new Date(from), quiet: quietHoursFromConfig(this.store.config) });
     return next ? next.getTime() : null;
   }
 
@@ -196,41 +202,53 @@ export default class Scheduler {
   async _deliver() {
     const now = Date.now();
     const due = this._isDue(now);
-    const usePending = this.store.state.pendingImage && fs.existsSync(this.store.pendingImagePath);
-
-    // Read the battery while the display is awake, before fetching: the
-    // server records it from the image request (X-Battery-Percentage)
-    const battery = await this._readBattery();
-    if (battery !== null) this.store.updateState({ battery, batteryAt: now });
-
-    let source;
-    try {
-      if (usePending) {
-        source = fs.readFileSync(this.store.pendingImagePath);
-      } else if (due) {
-        source = await fetchFrameImage({ store: this.store, frame: this.frame, onConfig: () => this._configFromServer() });
-      } else {
+    // The slot this delivery serves, read before config from the server can
+    // move it
+    const slot = this.store.state.nextRunAt;
+    const pendingId = this.store.state.pendingImage;
+    let pendingSource = null;
+    if (pendingId) {
+      try {
+        pendingSource = fs.readFileSync(this.store.pendingImagePath(pendingId));
+      } catch {
         // Pending flag without its file: nothing to show
-        this.store.updateState({ pendingImage: false });
-        return;
+        this.store.clearPendingImage(pendingId);
+      }
+    }
+    if (!pendingSource && !due) return;
+
+    // One MDC session for the battery read and the push
+    const device = this.createDevice();
+    try {
+      // Read the battery while the display is awake, before fetching: the
+      // server records it from the image request (X-Battery-Percentage).
+      // Once per image, not again on each retry.
+      if (this._attempts === 0) {
+        const battery = await this._readBattery(device);
+        if (battery !== null) this.store.updateState({ battery, batteryAt: now });
+      }
+
+      let source = pendingSource;
+      if (!source) {
+        // The server can take minutes (AI sources): don't hold the
+        // display's session open across that
+        await device.disconnect().catch(() => {});
+        source = await fetchFrameImage({ store: this.store, frame: this.frame, onConfig: before => this._configFromServer(before) });
       }
 
       const image = await this._toDisplayJpeg(source);
-      await this.contentServer.push(this.createDevice(), image);
+      await this.contentServer.push(device, image);
       fs.writeFileSync(this.store.lastImagePath, image);
-      log.info(`Pushed ${usePending ? 'manual' : 'scheduled'} image (${Math.round(image.length / 1024)} KB)`);
+      log.info(`Pushed ${pendingSource ? 'manual' : 'scheduled'} image (${Math.round(image.length / 1024)} KB)`);
 
+      if (pendingSource) this.store.clearPendingImage(pendingId);
       const update = { lastPushAt: now };
-      if (usePending) {
-        update.pendingImage = false;
-        fs.rmSync(this.store.pendingImagePath, { force: true });
-      }
       // A manual push at the due time stands in for the scheduled one. The
       // next run comes after the slot just served (the display can wake a
       // little early) and not right after this push (a late catch-up can
       // land just before the next slot), or one wake shows two images
       if (due) {
-        const served = Math.max(now, this.store.state.nextRunAt ?? now);
+        const served = Math.max(now, slot ?? now);
         update.nextRunAt = this._computeNextRun(served + MIN_PUSH_GAP_MS);
       }
       this.store.updateState(update);
@@ -240,15 +258,16 @@ export default class Scheduler {
       log.error(`Delivery failed (attempt ${this._attempts}/${MAX_ATTEMPTS}): ${err.message}`);
       if (this._attempts >= MAX_ATTEMPTS) {
         this._attempts = 0;
-        if (usePending) {
+        if (pendingSource) {
           log.error('Dropping the manual image');
-          this.store.updateState({ pendingImage: false });
-          fs.rmSync(this.store.pendingImagePath, { force: true });
+          this.store.clearPendingImage(pendingId);
         } else {
           this.store.updateState({ nextRunAt: now + RETRY_LATER_MS });
           log.info(`Next attempt at ${new Date(now + RETRY_LATER_MS).toLocaleString()}`);
         }
       }
+    } finally {
+      await device.disconnect().catch(() => {});
     }
   }
 
@@ -258,27 +277,28 @@ export default class Scheduler {
   // reliable format). No tone or color changes: those happened server-side.
   async _toDisplayJpeg(buffer) {
     const [width, height] = this.frame.dims();
-    let image;
+    let decoded;
     try {
-      image = await sharp(buffer).rotate().resize(width, height, { fit: 'cover' }).toBuffer();
+      // EXIF orientation and the mounting rotation are two rotate() calls,
+      // and sharp takes one per pipeline: hand raw pixels to the second
+      decoded = await sharp(buffer).rotate().resize(width, height, { fit: 'cover' })
+        .raw().toBuffer({ resolveWithObject: true });
     } catch (err) {
       throw new Error(`Unreadable image (${err.message}) — is the server sending full-color PNG for display_type "rgb"?`);
     }
-    let pipeline = sharp(image);
+    let pipeline = sharp(decoded.data, { raw: decoded.info });
     if (this.frame.rotation) pipeline = pipeline.rotate(this.frame.rotation);
     return pipeline.flatten({ background: '#ffffff' }).jpeg({ quality: 92, chromaSubsampling: '4:4:4' }).toBuffer();
   }
 
-  async _readBattery() {
-    const device = this.createDevice();
+  // Leaves the session open for the push; _deliver disconnects
+  async _readBattery(device) {
     try {
       await device.connect({ timeout: 5_000 });
       const { level } = await device.getBatteryState();
       return Number.isInteger(level) && level >= 0 && level <= 100 ? level : null;
     } catch {
       return null;
-    } finally {
-      await device.disconnect().catch(() => {});
     }
   }
 
@@ -297,10 +317,9 @@ export default class Scheduler {
   }
 
   // The server delivered newer config with the image (X-Config-Payload)
-  _configFromServer() {
+  _configFromServer(before) {
     log.info('Applied config from the server');
-    const { auto_rotate } = this.store.config;
-    if (!auto_rotate) this.store.updateState({ nextRunAt: null });
+    this.configChanged(before);
   }
 
 }

@@ -14,15 +14,7 @@ import log from './log.mjs';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-// The server's frame-password flow; meaningless without a password gate
-const IGNORED_CONFIG_KEYS = ['http_password', 'http_password_current'];
-
-function configFields(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const fields = { ...body };
-  for (const key of IGNORED_CONFIG_KEYS) delete fields[key];
-  return fields;
-}
+const isObject = body => !!body && typeof body === 'object' && !Array.isArray(body);
 
 export default function frameApi({ store, scheduler, frame }) {
   const router = express.Router();
@@ -46,11 +38,9 @@ export default function frameApi({ store, scheduler, frame }) {
 
   // POST carries the full config, PATCH a partial one; both merge
   const updateConfig = (req, res) => {
-    const fields = configFields(req.body);
-    if (!fields) return res.status(400).json({ message: 'Expected a JSON object' });
-    store.updateConfig(fields);
-    scheduler.configChanged();
-    log.info(`Config updated: ${Object.keys(fields).join(', ')}`);
+    if (!isObject(req.body)) return res.status(400).json({ message: 'Expected a JSON object' });
+    scheduler.configChanged(store.updateConfig(req.body));
+    log.info(`Config updated: ${Object.keys(req.body).join(', ')}`);
     res.json({ status: 'success' });
   };
   router.post('/api/config', updateConfig);
@@ -58,7 +48,7 @@ export default function frameApi({ store, scheduler, frame }) {
 
   router.get('/api/settings/processing', (_req, res) => res.json(store.processing));
   router.post('/api/settings/processing', (req, res) => {
-    if (!configFields(req.body)) return res.status(400).json({ message: 'Expected a JSON object' });
+    if (!isObject(req.body)) return res.status(400).json({ message: 'Expected a JSON object' });
     store.replaceProcessing(req.body);
     log.info('Processing settings updated');
     res.json({ status: 'success' });
@@ -68,7 +58,7 @@ export default function frameApi({ store, scheduler, frame }) {
   // config sync round-trips
   router.get('/api/settings/palette', (_req, res) => res.json(store.palette));
   router.post('/api/settings/palette', (req, res) => {
-    if (!configFields(req.body)) return res.status(400).json({ message: 'Expected a JSON object' });
+    if (!isObject(req.body)) return res.status(400).json({ message: 'Expected a JSON object' });
     store.replacePalette(req.body);
     res.json({ status: 'success' });
   });
@@ -84,8 +74,7 @@ export default function frameApi({ store, scheduler, frame }) {
         message: 'Not a PNG/JPEG image. The server must know this frame as display_type "rgb" so it sends full-color PNG.',
       });
     }
-    fs.writeFileSync(store.pendingImagePath, req.file.buffer);
-    store.updateState({ pendingImage: true });
+    store.queuePendingImage(req.file.buffer);
     log.info(`Manual push queued (${Math.round(req.file.size / 1024)} KB)`);
     scheduler.poke();
     res.json({ status: 'success' });
