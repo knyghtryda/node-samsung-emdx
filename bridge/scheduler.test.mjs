@@ -106,3 +106,23 @@ test('a push timeout during the MDC commands is not an unhandled rejection', asy
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+test('a push from the server, with its thumbnail, is queued', async () => {
+  const { default: express } = await import('express');
+  const { default: frameApi } = await import('./frameApi.mjs');
+  const store = tmpStore();
+  const s = scheduler(store);
+  const app = express().use(frameApi({ store, scheduler: s, frame: { version: 'test', dims: () => [64, 36] } }));
+  const server = await new Promise(resolve => { const srv = app.listen(0, () => resolve(srv)); });
+  try {
+    // Shaped like esp32-photoframe-server's PushImage
+    const form = new FormData();
+    form.append('image', new Blob([await png(64, 36)]), 'image.epdgz');
+    form.append('thumbnail', new Blob([await png(8, 4)]), 'thumbnail.jpg');
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/display-image`, { method: 'POST', body: form });
+    assert.equal(res.status, 200, await res.text());
+    assert.ok(store.state.pendingImage);
+  } finally {
+    server.close();
+  }
+});
